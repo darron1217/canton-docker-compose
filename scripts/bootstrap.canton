@@ -1,0 +1,23 @@
+// JWT 로 인증된 원격 콘솔에서 실행되는 초기화 스크립트 (재실행해도 안전).
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.version.ProtocolVersion
+
+val synchronizerName = "local"
+
+if (!sequencer.health.initialized()) {
+  bootstrap.synchronizer(
+    synchronizerName,
+    sequencers = Seq(sequencer),
+    mediators = Seq(mediator),
+    synchronizerOwners = Seq(sequencer),
+    synchronizerThreshold = PositiveInt.one,
+    staticSynchronizerParameters = StaticSynchronizerParameters.defaultsWithoutKMS(ProtocolVersion.latest),
+  )
+}
+
+if (!participant.synchronizers.list_registered().exists(_._1.synchronizerAlias.unwrap == synchronizerName)) {
+  participant.synchronizers.connect_local(sequencer, alias = synchronizerName)
+}
+
+participant.health.ping(participant)
+println("bootstrap complete: synchronizer '" + synchronizerName + "' is up and participant is connected")

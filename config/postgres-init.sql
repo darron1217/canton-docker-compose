@@ -1,0 +1,3 @@
+CREATE DATABASE participant;
+CREATE DATABASE sequencer;
+CREATE DATABASE mediator;

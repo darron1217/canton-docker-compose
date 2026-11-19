@@ -1,0 +1,125 @@
+name: canton-admin-auth
+
+x-canton-env: &canton-env
+  POSTGRES_USER: ${POSTGRES_USER}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  LOG_LEVEL_STDOUT: INFO
+  LOG_LEVEL_CANTON: INFO
+
+x-audiences: &audiences
+  PARTICIPANT_ADMIN_AUDIENCE: ${PARTICIPANT_ADMIN_AUDIENCE}
+  SEQUENCER_ADMIN_AUDIENCE: ${SEQUENCER_ADMIN_AUDIENCE}
+  MEDIATOR_ADMIN_AUDIENCE: ${MEDIATOR_ADMIN_AUDIENCE}
+
+x-remote-console: &remote-console
+  image: europe-docker.pkg.dev/da-images/public/docker/canton-participant:${CANTON_VERSION}
+  volumes:
+    - ./config/remote.conf:/config/remote.conf:ro
+    - ./scripts:/scripts:ro
+    - tokens:/tokens:ro
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d mediator"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  sequencer:
+    image: europe-docker.pkg.dev/da-images/public/docker/canton-sequencer:${CANTON_VERSION}
+    environment:
+      <<: *canton-env
+      SEQUENCER_ADMIN_AUDIENCE: ${SEQUENCER_ADMIN_AUDIENCE}
+    volumes:
+      # 이미지에 내장된 app.conf 를 이 예제의 설정으로 교체
+      - ./config/sequencer.conf:/app/app.conf:ro
+      # JWT 검증용 인증서만 마운트 (개인키는 tokens 서비스에만)
+      - ./keys/public:/keys:ro
+    ports:
+      - "127.0.0.1:5008:5008" # public api
+      - "127.0.0.1:5009:5009" # admin api (JWT 필요)
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: &canton-healthcheck
+      # gRPC health 서버(인증 없음)가 열렸는지 확인
+      test: ["CMD", "nc", "-z", "localhost", "5061"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
+
+  mediator:
+    image: europe-docker.pkg.dev/da-images/public/docker/canton-mediator:${CANTON_VERSION}
+    environment:
+      <<: *canton-env
+      MEDIATOR_ADMIN_AUDIENCE: ${MEDIATOR_ADMIN_AUDIENCE}
+    volumes:
+      - ./config/mediator.conf:/app/app.conf:ro
+      # JWT 검증용 인증서만 마운트 (개인키는 tokens 서비스에만)
+      - ./keys/public:/keys:ro
+    ports:
+      - "127.0.0.1:5007:5007" # admin api (JWT 필요)
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: *canton-healthcheck
+
+  participant:
+    image: europe-docker.pkg.dev/da-images/public/docker/canton-participant:${CANTON_VERSION}
+    environment:
+      <<: *canton-env
+      PARTICIPANT_ADMIN_AUDIENCE: ${PARTICIPANT_ADMIN_AUDIENCE}
+    volumes:
+      - ./config/participant.conf:/app/app.conf:ro
+      # JWT 검증용 인증서만 마운트 (개인키는 tokens 서비스에만)
+      - ./keys/public:/keys:ro
+    ports:
+      - "127.0.0.1:5001:5001" # ledger api (gRPC)
+      - "127.0.0.1:5002:5002" # admin api (JWT 필요)
+      - "127.0.0.1:7575:7575" # ledger api (JSON)
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck: *canton-healthcheck
+
+  # 개인키로 노드별 ES256 JWT 를 발급해 tokens 볼륨에 기록
+  tokens:
+    image: alpine/openssl:3.5.4
+    entrypoint: ["/scripts/issue-tokens.sh"]
+    environment:
+      <<: *audiences
+      ADMIN_API_JWT_KEY: /keys/private/admin-jwt.key
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./keys/private:/keys/private:ro
+      - tokens:/tokens
+
+  # 발급된 JWT 로 Admin API 에 접속해 synchronizer 를 초기화하고 participant 를 연결
+  bootstrap:
+    <<: *remote-console
+    entrypoint: ["/scripts/remote-console.sh", "run", "/scripts/bootstrap.canton", "--no-tty"]
+    depends_on:
+      tokens: { condition: service_completed_successfully }
+      sequencer: { condition: service_healthy }
+      mediator: { condition: service_healthy }
+      participant: { condition: service_healthy }
+
+  # 대화형 원격 콘솔:  docker compose run --rm console
+  console:
+    <<: *remote-console
+    profiles: ["console"]
+    entrypoint: ["/scripts/remote-console.sh"]
+    stdin_open: true
+    tty: true
+    depends_on:
+      tokens: { condition: service_completed_successfully }
+
+volumes:
+  postgres-data:
+  tokens:
